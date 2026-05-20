@@ -567,6 +567,27 @@ describe('AsyncRetryer', () => {
       expect(onAbort).toHaveBeenCalledWith('execution-timeout', retryer)
     })
 
+    it('should clear maxExecutionTime timer after successful execution', async () => {
+      const mockFn = vi.fn().mockResolvedValue('success')
+      const onExecutionTimeout = vi.fn()
+      const onAbort = vi.fn()
+      const retryer = new AsyncRetryer(mockFn, {
+        maxExecutionTime: 1000,
+        onExecutionTimeout,
+        onAbort,
+        throwOnError: false,
+      })
+
+      await retryer.execute()
+
+      vi.advanceTimersByTime(1001)
+
+      expect(onExecutionTimeout).not.toHaveBeenCalled()
+      expect(onAbort).not.toHaveBeenCalled()
+      expect(retryer.store.state.status).toBe('idle')
+      expect(retryer.store.state.lastResult).toBe('success')
+    })
+
     it('should not call onAbort for AbortError exceptions', async () => {
       const mockFn = vi
         .fn()

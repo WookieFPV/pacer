@@ -484,10 +484,15 @@ export class AsyncRetryer<TFn extends AnyAsyncFunction> {
         if (this.options.maxExecutionTime === Infinity) {
           result = (await this.fn(...args)) as Awaited<ReturnType<TFn>>
         } else {
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          const clearExecutionTimeout = () => {
+            if (timeout !== undefined) clearTimeout(timeout)
+          }
+
           result = (await Promise.race([
             this.fn(...args),
             new Promise<never>((_, reject) => {
-              const timeout = setTimeout(() => {
+              timeout = setTimeout(() => {
                 this.options.onExecutionTimeout?.(this)
                 this.abort('execution-timeout')
                 reject(
@@ -500,13 +505,13 @@ export class AsyncRetryer<TFn extends AnyAsyncFunction> {
               signal.addEventListener(
                 'abort',
                 () => {
-                  clearTimeout(timeout)
+                  clearExecutionTimeout()
                   reject(new Error('Aborted'))
                 },
                 { once: true },
               )
             }),
-          ])) as Awaited<ReturnType<TFn>>
+          ]).finally(clearExecutionTimeout)) as Awaited<ReturnType<TFn>>
         }
 
         // Check if cancelled during execution
