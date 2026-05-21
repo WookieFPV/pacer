@@ -451,48 +451,48 @@ export class AsyncRetryer<TFn extends AnyAsyncFunction> {
     })
 
     // Set up total execution timeout
-    let totalTimeoutId: ReturnType<typeof setTimeout> | undefined
-    if (this.options.maxTotalExecutionTime !== Infinity) {
-      totalTimeoutId = setTimeout(() => {
-        this.options.onTotalExecutionTimeout?.(this)
-        this.abort('total-timeout')
-      }, this.options.maxTotalExecutionTime)
+    const totalTimeoutId =
+      this.options.maxTotalExecutionTime !== Infinity
+        ? setTimeout(() => {
+            this.options.onTotalExecutionTimeout?.(this)
+            this.abort('total-timeout')
+          }, this.options.maxTotalExecutionTime)
+        : undefined
+    const clearTotalExecutionTimeout = () => {
+      if (totalTimeoutId !== undefined) {
+        clearTimeout(totalTimeoutId)
+      }
     }
 
-    let isLastAttempt = false
-    for (let attempt = 1; attempt <= this.#getMaxAttempts(); attempt++) {
-      isLastAttempt = attempt === this.#getMaxAttempts()
-      this.#setState({ currentAttempt: attempt })
+    try {
+      let isLastAttempt = false
+      for (let attempt = 1; attempt <= this.#getMaxAttempts(); attempt++) {
+        isLastAttempt = attempt === this.#getMaxAttempts()
+        this.#setState({ currentAttempt: attempt })
 
-      try {
-        if (signal.aborted) {
-          return undefined
-        }
-
-        // Check if total execution time has been exceeded
-        const currentTotalTime = Date.now() - startTime
-        if (
-          this.options.maxTotalExecutionTime !== Infinity &&
-          currentTotalTime >= this.options.maxTotalExecutionTime
-        ) {
-          this.options.onTotalExecutionTimeout?.(this)
-          this.abort('total-timeout')
-          return undefined
-        }
-
-        // Execute with individual timeout if specified
-        if (this.options.maxExecutionTime === Infinity) {
-          result = (await this.fn(...args)) as Awaited<ReturnType<TFn>>
-        } else {
-          let timeout: ReturnType<typeof setTimeout> | undefined
-          const clearExecutionTimeout = () => {
-            if (timeout !== undefined) clearTimeout(timeout)
+        try {
+          if (signal.aborted) {
+            return undefined
           }
 
-          result = (await Promise.race([
-            this.fn(...args),
-            new Promise<never>((_, reject) => {
-              timeout = setTimeout(() => {
+          // Check if total execution time has been exceeded
+          const currentTotalTime = Date.now() - startTime
+          if (
+            this.options.maxTotalExecutionTime !== Infinity &&
+            currentTotalTime >= this.options.maxTotalExecutionTime
+          ) {
+            this.options.onTotalExecutionTimeout?.(this)
+            this.abort('total-timeout')
+            return undefined
+          }
+
+          // Execute with individual timeout if specified
+          if (this.options.maxExecutionTime === Infinity) {
+            result = (await this.fn(...args)) as Awaited<ReturnType<TFn>>
+          } else {
+            const executionPromise = this.fn(...args)
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              const timeout = setTimeout(() => {
                 this.options.onExecutionTimeout?.(this)
                 this.abort('execution-timeout')
                 reject(
@@ -502,100 +502,110 @@ export class AsyncRetryer<TFn extends AnyAsyncFunction> {
                 )
               }, this.options.maxExecutionTime)
 
-              signal.addEventListener(
-                'abort',
-                () => {
-                  clearExecutionTimeout()
-                  reject(new Error('Aborted'))
-                },
-                { once: true },
-              )
-            }),
-          ]).finally(clearExecutionTimeout)) as Awaited<ReturnType<TFn>>
-        }
+              function cleanup() {
+                clearTimeout(timeout)
+                signal.removeEventListener('abort', handleAbort)
+              }
 
-        // Check if cancelled during execution
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-        if (signal.aborted) {
-          return undefined
-        }
+              function handleAbort() {
+                cleanup()
+                reject(new Error('Aborted'))
+              }
 
-        const totalTime = Date.now() - startTime
-        this.#setState({
-          executionCount: this.store.state.executionCount + 1,
-          isExecuting: false,
-          lastExecutionTime: Date.now(),
-          totalExecutionTime: totalTime,
-          currentAttempt: 0,
-          lastResult: result,
-        })
+              signal.addEventListener('abort', handleAbort, { once: true })
+              executionPromise.then(cleanup, cleanup)
+            })
+
+            result = (await Promise.race([
+              executionPromise,
+              timeoutPromise,
+            ])) as Awaited<ReturnType<TFn>>
+          }
+
+          // Check if cancelled during execution
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+          if (signal.aborted) {
+            return undefined
+          }
+
+          const totalTime = Date.now() - startTime
+          this.#setState({
+            executionCount: this.store.state.executionCount + 1,
+            isExecuting: false,
+            lastExecutionTime: Date.now(),
+            totalExecutionTime: totalTime,
+            currentAttempt: 0,
+            lastResult: result,
+          })
 
         this.options.onSuccess?.(result as Awaited<ReturnType<TFn>>, args, this)
 
-        return result
-      } catch (error) {
-        // Treat abort as a non-error cancellation outcome
-        if (
-          error &&
-          typeof error === 'object' &&
-          'name' in error &&
-          (error as Error).name === 'AbortError'
-        ) {
-          return undefined
-        }
-        lastError = error instanceof Error ? error : new Error(String(error))
-        this.#setState({ lastError })
+          return result
+        } catch (error) {
+          // Treat abort as a non-error cancellation outcome
+          if (
+            error &&
+            typeof error === 'object' &&
+            'name' in error &&
+            (error as Error).name === 'AbortError'
+          ) {
+            return undefined
+          }
+          lastError = error instanceof Error ? error : new Error(String(error))
+          this.#setState({ lastError })
 
-        // Call onError for every error (including during retries)
-        this.options.onError?.(lastError, args, this)
+          // Call onError for every error (including during retries)
+          this.options.onError?.(lastError, args, this)
 
-        if (attempt < this.#getMaxAttempts()) {
-          this.options.onRetry?.(attempt, lastError, this)
+          if (attempt < this.#getMaxAttempts()) {
+            this.options.onRetry?.(attempt, lastError, this)
 
-          const wait = this.#calculateWait(attempt)
-          if (wait > 0) {
-            // Eagerly reflect retrying status during the wait window
+            const wait = this.#calculateWait(attempt)
+            if (wait > 0) {
+              // Eagerly reflect retrying status during the wait window
             this.#setState({ isExecuting: true, currentAttempt: attempt + 1 })
-            await new Promise<void>((resolve) => {
-              const timeout = setTimeout(() => {
-                signal.removeEventListener('abort', onAbort)
-                resolve()
-              }, wait)
-              const onAbort = () => {
-                clearTimeout(timeout)
-                signal.removeEventListener('abort', onAbort)
-                resolve()
+              await new Promise<void>((resolve) => {
+                const timeout = setTimeout(() => {
+                  signal.removeEventListener('abort', onAbort)
+                  resolve()
+                }, wait)
+                const onAbort = () => {
+                  clearTimeout(timeout)
+                  signal.removeEventListener('abort', onAbort)
+                  resolve()
+                }
+                signal.addEventListener('abort', onAbort)
+              })
+              if (signal.aborted) {
+                return undefined
               }
-              signal.addEventListener('abort', onAbort)
-            })
-            if (signal.aborted) {
-              return undefined
             }
           }
+        } finally {
+          this.options.onSettled?.(args, this)
         }
-      } finally {
-        this.options.onSettled?.(args, this)
+      }
+
+      // Exhausted retries - finalize state
+      this.#setState({ isExecuting: false })
+      this.options.onLastError?.(lastError as Error, this)
+      this.options.onSettled?.(args, this)
+
+      if (
+        (this.options.throwOnError === 'last' && isLastAttempt) ||
+        this.options.throwOnError === true
+      ) {
+        throw lastError
+      }
+
+      return undefined
+    } finally {
+      clearTotalExecutionTimeout()
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      if (this.#abortController?.signal === signal) {
+        this.#abortController = null
       }
     }
-
-    // Clean up total timeout
-    if (totalTimeoutId) {
-      clearTimeout(totalTimeoutId)
-    }
-
-    // Exhausted retries - finalize state
-    this.#setState({ isExecuting: false })
-    this.options.onLastError?.(lastError as Error, this)
-    this.options.onSettled?.(args, this)
-
-    if (
-      (this.options.throwOnError === 'last' && isLastAttempt) ||
-      this.options.throwOnError === true
-    ) {
-      throw lastError
-    }
-
-    return undefined
   }
 
   /**

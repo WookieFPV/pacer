@@ -588,6 +588,71 @@ describe('AsyncRetryer', () => {
       expect(retryer.store.state.lastResult).toBe('success')
     })
 
+    it('should clear maxExecutionTime timer after failed attempt before retrying', async () => {
+      const mockFn = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Failure'))
+        .mockResolvedValue('success')
+      const onExecutionTimeout = vi.fn()
+      const onAbort = vi.fn()
+      const retryer = new AsyncRetryer(mockFn, {
+        maxExecutionTime: 1000,
+        baseWait: 2000,
+        onExecutionTimeout,
+        onAbort,
+        throwOnError: false,
+      })
+
+      const executePromise = retryer.execute()
+
+      await vi.advanceTimersByTimeAsync(1001)
+
+      expect(onExecutionTimeout).not.toHaveBeenCalled()
+      expect(onAbort).not.toHaveBeenCalled()
+      expect(mockFn).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(999)
+      const result = await executePromise
+
+      expect(result).toBe('success')
+      expect(mockFn).toHaveBeenCalledTimes(2)
+    })
+
+    it('should clear maxTotalExecutionTime timer after successful execution', async () => {
+      const mockFn = vi.fn().mockResolvedValue('success')
+      const onTotalExecutionTimeout = vi.fn()
+      const onAbort = vi.fn()
+      const retryer = new AsyncRetryer(mockFn, {
+        maxTotalExecutionTime: 1000,
+        onTotalExecutionTimeout,
+        onAbort,
+        throwOnError: false,
+      })
+
+      await retryer.execute()
+
+      vi.advanceTimersByTime(1001)
+
+      expect(onTotalExecutionTimeout).not.toHaveBeenCalled()
+      expect(onAbort).not.toHaveBeenCalled()
+      expect(retryer.store.state.status).toBe('idle')
+      expect(retryer.store.state.lastResult).toBe('success')
+    })
+
+    it('should clear the abort signal after successful execution', async () => {
+      const mockFn = vi.fn().mockResolvedValue('success')
+      const onAbort = vi.fn()
+      const retryer = new AsyncRetryer(mockFn, { onAbort })
+
+      await retryer.execute()
+
+      expect(retryer.getAbortSignal()).toBeNull()
+
+      await retryer.execute()
+
+      expect(onAbort).not.toHaveBeenCalled()
+    })
+
     it('should not call onAbort for AbortError exceptions', async () => {
       const mockFn = vi
         .fn()
